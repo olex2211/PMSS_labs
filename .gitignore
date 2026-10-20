@@ -1,0 +1,40 @@
+# Android Studio and Gradle generated files
+.gradle/
+**/build/
+**/.idea/
+**/.kotlin/
+*.iml
+local.properties
+
+# Native build outputs
+.externalNativeBuild/
+.cxx/
+
+# Local logs, temporary files, and emulator data
+*.log
+.build-tmp/
+captures/
+*.hprof
+
+# OS files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Local credentials and signing material (for future labs)
+secrets.properties
+*.jks
+*.keystore
+*.p12
+service-account*.json
+
+# Local source extraction and short JVM temporary directory
+/tmp/
+
+# Keep only the root README; exclude reports and exported documents.
+*.md
+!/README.md
+*.pdf
+*.docx
+*.zip
+/emergency-flashlight/docs/
