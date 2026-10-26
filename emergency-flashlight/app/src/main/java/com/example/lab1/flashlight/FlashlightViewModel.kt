@@ -1,11 +1,17 @@
 package com.example.lab1.flashlight
 
 import android.app.Application
+import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.lab1.FlashlightApp
 import com.example.lab1.helpers.*
 import com.example.lab1.helpers.ble.*
+import com.example.lab1.repository.CloudConfig
+import com.example.lab1.repository.OfflineException
+import com.example.lab1.repository.SensorReading
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.Job
@@ -30,18 +36,28 @@ class FlashlightViewModel(application: Application) : AndroidViewModel(applicati
     }
     private val scanner = MockBleScanner()
     private val connector: IBleConnector = MockBleConnector()
+    private val repository = (application as FlashlightApp).repository
+    private val network = NetworkMonitor(application)
     private val timeFormat = SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault())
     private var sensorJob: Job? = null
     private var scanJob: Job? = null
     private var connectJob: Job? = null
     private var transferJob: Job? = null
+    private var uploadJob: Job? = null
+    private var networkJob: Job? = null
+    private var latestReading: SensorReading? = null
+    private var pendingNotified = false
     private var lastUiNanos = 0L
     private var peakG = 0f
     private var active = false
 
     init {
         _state.update { it.copy(thresholdG = detector.thresholdG, sensorAvailable = sensor.available,
-            sensorName = sensor.name, torch = flashlight.state, cameraPermission = settings.cameraAllowed()) }
+            sensorName = sensor.name, torch = flashlight.state, cameraPermission = settings.cameraAllowed(),
+            online = network.isOnlineNow(), pendingCount = repository.pending.value) }
+        viewModelScope.launch(start = CoroutineStart.UNDISPATCHED) {
+            repository.pending.collect { count -> _state.update { it.copy(pendingCount = count) } }
+        }
         viewModelScope.launch(start = CoroutineStart.UNDISPATCHED) {
             connector.connection.collect { status -> _state.update { it.copy(connection = status) } }
         }
@@ -98,6 +114,10 @@ class FlashlightViewModel(application: Application) : AndroidViewModel(applicati
                 else message("Wait for an accelerometer reading first")
             }
             FlashlightAction.ClearTerminal -> _state.update { it.copy(terminal = emptyList()) }
+            is FlashlightAction.CloudEnabledChanged -> _state.update {
+                it.copy(cloudEnabled = action.enabled, syncStatus = if (action.enabled) it.syncStatus else SyncStatus.Idle)
+            }
+            FlashlightAction.SyncNow -> syncNow()
         }
     }
 
@@ -115,11 +135,15 @@ class FlashlightViewModel(application: Application) : AndroidViewModel(applicati
             } catch (error: Exception) { message(error.message ?: "Sensor error")
             } finally { _state.update { it.copy(sensorActive = false) } }
         }
+        startCloud()
     }
 
     private fun stop() {
         active = false
         sensorJob?.cancel(); sensorJob = null
+        uploadJob?.cancel(); uploadJob = null
+        networkJob?.cancel(); networkJob = null
+        latestReading = null
         detector.reset()
         scanJob?.cancel(); scanJob = null
         disconnect()
@@ -197,9 +221,13 @@ class FlashlightViewModel(application: Application) : AndroidViewModel(applicati
         if (!active || !listOf(v.x, v.y, v.z).all { it.isFinite() }) return
         val sample = detector.accept(v.x, v.y, v.z, v.timestampNanos)
         peakG = maxOf(peakG, sample.magnitudeG)
+        val reading = SensorReading(x = v.x, y = v.y, z = v.z, magnitudeG = sample.magnitudeG,
+            shake = sample.triggered, timestamp = System.currentTimeMillis())
+        latestReading = reading.copy(shake = false)
         if (sample.triggered) {
             _state.update { it.copy(shakeCount = it.shakeCount + 1,
                 events = (listOf(ShakeEvent(timeFormat.format(Date()), sample.magnitudeG)) + it.events).take(5)) }
+            viewModelScope.launch { upload(reading) }
             if (state.value.automatic) flashlight.setEnabled(true)
             if (connector.connection.value == ConnectionStatus.Connected) {
                 write(FlashlightBleProfile.shake(v.x, v.y, v.z, sample.magnitudeG), FlashlightBleProfile.TELEMETRY)
@@ -208,6 +236,65 @@ class FlashlightViewModel(application: Application) : AndroidViewModel(applicati
         if (lastUiNanos == 0L || v.timestampNanos - lastUiNanos >= 50_000_000L || sample.triggered) {
             lastUiNanos = v.timestampNanos
             _state.update { it.copy(x = v.x, y = v.y, z = v.z, magnitudeG = sample.magnitudeG, peakG = peakG, hasReading = true) }
+        }
+    }
+
+    /** Reacts to network changes and sends the latest reading every [CloudConfig.UPLOAD_INTERVAL_MS]. */
+    private fun startCloud() {
+        networkJob = viewModelScope.launch {
+            network.online().collect { online ->
+                Log.i(CloudConfig.TAG, "NETWORK " + if (online) "online" else "offline")
+                _state.update { it.copy(online = online) }
+                if (online) flushPending()
+            }
+        }
+        uploadJob = viewModelScope.launch {
+            while (true) {
+                delay(CloudConfig.UPLOAD_INTERVAL_MS)
+                latestReading?.let { upload(it) }
+            }
+        }
+    }
+
+    private fun syncNow() {
+        if (!state.value.cloudEnabled) { message("Cloud sync is off"); return }
+        viewModelScope.launch {
+            latestReading?.let { upload(it) }
+            flushPending()
+        }
+    }
+
+    private suspend fun upload(reading: SensorReading) {
+        if (!state.value.cloudEnabled) return
+        _state.update { it.copy(syncStatus = SyncStatus.Syncing) }
+        repository.save(reading, online = state.value.online)
+            .onSuccess { key ->
+                pendingNotified = false
+                Log.i(CloudConfig.TAG, "UPLOADED key=$key shake=${reading.shake} g=${"%.2f".format(Locale.US, reading.magnitudeG)}")
+                _state.update { it.copy(syncStatus = SyncStatus.Synced, uploadedCount = it.uploadedCount + 1,
+                    lastCloudKey = key, lastSyncTime = timeFormat.format(Date())) }
+                flushPending()
+            }
+            .onFailure { error -> markPending(error) }
+    }
+
+    private suspend fun flushPending() {
+        if (repository.pending.value == 0) return
+        val sent = repository.syncPending()
+        val left = repository.pending.value
+        Log.i(CloudConfig.TAG, "SYNC pending sent=$sent left=$left")
+        _state.update { it.copy(uploadedCount = it.uploadedCount + sent,
+            syncStatus = if (left > 0) SyncStatus.Pending else SyncStatus.Synced,
+            lastSyncTime = if (sent > 0) timeFormat.format(Date()) else it.lastSyncTime) }
+        if (sent > 0 && left == 0) { pendingNotified = false; message("Pending readings sent: $sent") }
+    }
+
+    private fun markPending(error: Throwable) {
+        Log.i(CloudConfig.TAG, "PENDING ${error.javaClass.simpleName}: ${error.message}")
+        _state.update { it.copy(syncStatus = SyncStatus.Pending) }
+        if (!pendingNotified) {
+            pendingNotified = true
+            message(if (error is OfflineException) "No network: readings kept as Pending" else "Cloud unavailable: readings kept as Pending")
         }
     }
 

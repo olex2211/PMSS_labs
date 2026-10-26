@@ -66,7 +66,7 @@ fun FlashlightContent(state: FlashlightUiState, onAction: (FlashlightAction) -> 
             Modifier.fillMaxSize().safeDrawingPadding().verticalScroll(rememberScrollState()).padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            Text("LAB 02  /  VARIANT 16", color = colors.primary, style = MaterialTheme.typography.labelMedium, letterSpacing = 1.5.sp)
+            Text("LAB 03  /  VARIANT 16", color = colors.primary, style = MaterialTheme.typography.labelMedium, letterSpacing = 1.5.sp)
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text("Emergency\nFlashlight", fontWeight = FontWeight.Bold, fontSize = 34.sp, lineHeight = 37.sp)
                 Text("Shake to turn on the light", color = colors.onSurfaceVariant)
@@ -100,6 +100,8 @@ fun FlashlightContent(state: FlashlightUiState, onAction: (FlashlightAction) -> 
                     }
                 }
             }
+
+            CloudPanel(state, onAction)
 
             BlePanel(state, onAction)
 
@@ -267,6 +269,44 @@ private fun BlePanel(state: FlashlightUiState, onAction: (FlashlightAction) -> U
                     Text("${entry.time} ${entry.message}", fontFamily = FontFamily.Monospace,
                         style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(bottom = 6.dp))
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CloudPanel(state: FlashlightUiState, onAction: (FlashlightAction) -> Unit) {
+    val colors = MaterialTheme.colorScheme
+    val statusColor = when (state.syncStatus) {
+        SyncStatus.Synced -> Color(0xFF3DDC84)
+        SyncStatus.Pending -> Color(0xFFFF5252)
+        SyncStatus.Syncing -> Color(0xFFFFC107)
+        SyncStatus.Idle -> colors.outline
+    }
+    val statusText = when (state.syncStatus) {
+        SyncStatus.Synced -> "Synced"
+        SyncStatus.Pending -> "Pending · ${state.pendingCount} queued"
+        SyncStatus.Syncing -> "Syncing"
+        SyncStatus.Idle -> if (state.cloudEnabled) "Waiting for data" else "Cloud sync is off"
+    }
+    Card(shape = RoundedCornerShape(24.dp)) {
+        Column(Modifier.fillMaxWidth().padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text("Cloud sync · Firebase", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Text("REST over HTTPS · latest reading every 5 s and on every shake", style = MaterialTheme.typography.bodySmall)
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Canvas(Modifier.size(14.dp).semantics { contentDescription = "Cloud status: $statusText" }) { drawCircle(statusColor) }
+                Text(statusText, fontWeight = FontWeight.SemiBold, color = statusColor)
+            }
+            Text("Network: " + if (state.online) "online" else "offline", style = MaterialTheme.typography.bodyMedium)
+            Text("Sent: ${state.uploadedCount}" + (state.lastCloudKey?.let { " · last key $it · ${state.lastSyncTime}" } ?: ""),
+                style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("Send readings to the cloud", Modifier.weight(1f), style = MaterialTheme.typography.titleSmall)
+                Switch(checked = state.cloudEnabled, onCheckedChange = { onAction(FlashlightAction.CloudEnabledChanged(it)) },
+                    modifier = Modifier.semantics { contentDescription = "Send readings to the cloud" })
+            }
+            Button(onClick = { onAction(FlashlightAction.SyncNow) }, enabled = state.cloudEnabled, modifier = Modifier.fillMaxWidth()) {
+                Text("Send now")
             }
         }
     }

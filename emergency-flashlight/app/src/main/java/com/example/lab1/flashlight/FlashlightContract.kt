@@ -5,6 +5,8 @@ import com.example.lab1.helpers.TorchState
 import com.example.lab1.helpers.ble.BleDevice
 import com.example.lab1.helpers.ble.ConnectionStatus
 
+enum class SyncStatus { Idle, Syncing, Synced, Pending }
+
 data class ShakeEvent(val time: String = "", val magnitudeG: Float = 0f)
 data class TerminalEntry(val time: String = "", val message: String = "")
 
@@ -31,6 +33,13 @@ data class FlashlightUiState(
     val transferring: Boolean = false,
     val remoteLight: Boolean? = null,
     val terminal: List<TerminalEntry> = emptyList(),
+    val cloudEnabled: Boolean = true,
+    val online: Boolean = true,
+    val syncStatus: SyncStatus = SyncStatus.Idle,
+    val pendingCount: Int = 0,
+    val uploadedCount: Int = 0,
+    val lastCloudKey: String? = null,
+    val lastSyncTime: String = "",
 )
 
 sealed interface FlashlightAction {
@@ -50,6 +59,8 @@ sealed interface FlashlightAction {
     data class SendLight(val enabled: Boolean) : FlashlightAction
     data object SendReading : FlashlightAction
     data object ClearTerminal : FlashlightAction
+    data class CloudEnabledChanged(val enabled: Boolean) : FlashlightAction
+    data object SyncNow : FlashlightAction
 }
 
 sealed interface FlashlightEvent {
