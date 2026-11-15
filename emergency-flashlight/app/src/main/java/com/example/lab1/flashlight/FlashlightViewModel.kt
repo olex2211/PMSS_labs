@@ -12,6 +12,7 @@ import com.example.lab1.decision.LightDecision
 import com.example.lab1.decision.LightSource
 import com.example.lab1.helpers.*
 import com.example.lab1.helpers.ble.*
+import com.example.lab1.helpers.ml.*
 import com.example.lab1.repository.CloudConfig
 import com.example.lab1.repository.OfflineException
 import com.example.lab1.repository.SensorReading
@@ -22,7 +23,10 @@ import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.withContext
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
 import java.text.SimpleDateFormat
@@ -60,11 +64,22 @@ class FlashlightViewModel(application: Application) : AndroidViewModel(applicati
     private var lastUiNanos = 0L
     private var peakG = 0f
     private var active = false
+    private var gyroJob: Job? = null
+    private val windowBuilder = ImuWindowBuilder()
+    @Volatile private var model: ActivityModel? = null
+    private val inferenceBusy = AtomicBoolean(false)
+    @Volatile private var recordIntervalMs = StorageConfig.RECORD_INTERVAL_MS
+    private var lastActivity: Activity? = null
 
     init {
         _state.update { it.copy(thresholdG = detector.thresholdG, sensorAvailable = sensor.available,
             sensorName = sensor.name, torch = flashlight.state, cameraPermission = settings.cameraAllowed(),
             online = network.isOnlineNow(), vibratorAvailable = vibrator.available) }
+        viewModelScope.launch {
+            runCatching { withContext(Dispatchers.Default) { TfliteActivityModel(application) } }
+                .onSuccess { model = it; _state.update { s -> s.copy(modelReady = true) }; Log.i(ML_TAG, "MODEL loaded " + TfliteActivityModel.MODEL_ASSET) }
+                .onFailure { e -> Log.w(ML_TAG, "MODEL failed: " + e.message); _state.update { s -> s.copy(modelError = e.message ?: "Model error") } }
+        }
         viewModelScope.launch(start = CoroutineStart.UNDISPATCHED) {
             repository.pending.collect { count -> _state.update { it.copy(pendingCount = count) } }
         }
@@ -145,12 +160,19 @@ class FlashlightViewModel(application: Application) : AndroidViewModel(applicati
             } catch (error: Exception) { message(error.message ?: "Sensor error")
             } finally { _state.update { it.copy(sensorActive = false) } }
         }
+        if (sensor.gyroscopeAvailable) gyroJob = viewModelScope.launch {
+            sensor.gyroscopeReadings().collect { windowBuilder.onGyroscope(it.x, it.y, it.z) }
+        }
         startCloud()
     }
 
     private fun stop() {
         active = false
         sensorJob?.cancel(); sensorJob = null
+        gyroJob?.cancel(); gyroJob = null
+        windowBuilder.reset()
+        recordIntervalMs = StorageConfig.RECORD_INTERVAL_MS
+        lastActivity = null
         uploadJob?.cancel(); uploadJob = null
         networkJob?.cancel(); networkJob = null
         commandJob?.cancel(); commandJob = null
@@ -158,7 +180,8 @@ class FlashlightViewModel(application: Application) : AndroidViewModel(applicati
         scanJob?.cancel(); scanJob = null
         disconnect()
         flashlight.stop()
-        _state.update { it.copy(sensorActive = false, scanning = false) }
+        _state.update { it.copy(sensorActive = false, scanning = false, windowFill = 0, activity = null,
+            activityConfidence = 0f, activityScores = emptyList(), recordIntervalMs = StorageConfig.RECORD_INTERVAL_MS) }
     }
 
     private fun scan() {
@@ -233,11 +256,13 @@ class FlashlightViewModel(application: Application) : AndroidViewModel(applicati
         peakG = maxOf(peakG, sample.magnitudeG)
         val reading = SensorReading(x = v.x, y = v.y, z = v.z, magnitudeG = sample.magnitudeG,
             shake = sample.triggered, timestamp = System.currentTimeMillis())
-        // Room gets one row per second for the time series; a shake is stored at once and sent at once.
-        if (!sample.triggered && reading.timestamp - lastRecordMs >= StorageConfig.RECORD_INTERVAL_MS) {
+        // Room gets one row per second (every 250 ms while the model reports walking); a shake is stored at once and sent at once.
+        if (!sample.triggered && reading.timestamp - lastRecordMs >= recordIntervalMs) {
             lastRecordMs = reading.timestamp
             viewModelScope.launch { repository.record(reading) }
         }
+        windowBuilder.onAccelerometer(v.x, v.y, v.z, v.timestampNanos)
+        windowBuilder.windowIfDue()?.let(::classify)
         if (sample.triggered) {
             lastRecordMs = reading.timestamp
             _state.update { it.copy(shakeCount = it.shakeCount + 1,
@@ -253,8 +278,35 @@ class FlashlightViewModel(application: Application) : AndroidViewModel(applicati
         }
         if (lastUiNanos == 0L || v.timestampNanos - lastUiNanos >= 50_000_000L || sample.triggered) {
             lastUiNanos = v.timestampNanos
-            _state.update { it.copy(x = v.x, y = v.y, z = v.z, magnitudeG = sample.magnitudeG, peakG = peakG, hasReading = true) }
+            _state.update { it.copy(x = v.x, y = v.y, z = v.z, magnitudeG = sample.magnitudeG, peakG = peakG, hasReading = true,
+                windowFill = windowBuilder.fill) }
         }
+    }
+
+    /** Runs the model off the main thread; a window that arrives while one is running is skipped. */
+    private fun classify(window: FloatArray) {
+        val m = model ?: return
+        if (!inferenceBusy.compareAndSet(false, true)) return
+        viewModelScope.launch {
+            try {
+                val prediction = withContext(Dispatchers.Default) { m.classify(window) }
+                if (active) applyPrediction(prediction)
+            } catch (error: CancellationException) { throw error
+            } catch (error: Exception) { Log.w(ML_TAG, "INFERENCE failed: " + error.message)
+            } finally { inferenceBusy.set(false) }
+        }
+    }
+
+    /** Motion classes shorten the Room record interval (lab 5 integration); the light is still driven by the shake rule. */
+    private fun applyPrediction(p: Prediction) {
+        recordIntervalMs = if (p.activity.moving) StorageConfig.MOTION_RECORD_INTERVAL_MS else StorageConfig.RECORD_INTERVAL_MS
+        Log.d(ML_TAG, "SCORES " + p.scores.joinToString(" ") { String.format(Locale.US, "%.2f", it) })
+        if (p.activity != lastActivity) {
+            lastActivity = p.activity
+            Log.i(ML_TAG, "ACTIVITY " + p.activity.name + " conf=" + String.format(Locale.US, "%.2f", p.confidence) + " recordEveryMs=" + recordIntervalMs)
+        }
+        _state.update { it.copy(activity = p.activity, activityConfidence = p.confidence,
+            activityScores = p.scores, recordIntervalMs = recordIntervalMs) }
     }
 
     /** Reacts to network changes and sends the rows Room still holds as unsynced every [CloudConfig.UPLOAD_INTERVAL_MS]. */
@@ -378,6 +430,7 @@ class FlashlightViewModel(application: Application) : AndroidViewModel(applicati
     override fun onCleared() {
         stop()
         flashlight.close()
+        model?.close(); model = null
         _events.close()
         super.onCleared()
     }
@@ -385,5 +438,6 @@ class FlashlightViewModel(application: Application) : AndroidViewModel(applicati
     companion object {
         private const val OPERATION_TIMEOUT_MS = 5_000L
         const val ACTUATOR_TAG = "FlashlightActuator"
+        const val ML_TAG = "FlashlightML"
     }
 }

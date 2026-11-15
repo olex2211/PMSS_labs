@@ -3,8 +3,10 @@ package com.example.lab1.flashlight
 import com.example.lab1.decision.LightSource
 import com.example.lab1.helpers.ShakeDetector
 import com.example.lab1.helpers.TorchState
+import com.example.lab1.helpers.ml.Activity
 import com.example.lab1.helpers.ble.BleDevice
 import com.example.lab1.helpers.ble.ConnectionStatus
+import com.example.lab1.repository.StorageConfig
 
 enum class SyncStatus { Idle, Syncing, Synced, Pending }
 
@@ -46,6 +48,13 @@ data class FlashlightUiState(
     val lastLightSource: LightSource? = null,
     val lastLightTime: String = "",
     val actuatorLog: List<TerminalEntry> = emptyList(),
+    val modelReady: Boolean = false,
+    val modelError: String? = null,
+    val windowFill: Int = 0,
+    val activity: Activity? = null,
+    val activityConfidence: Float = 0f,
+    val activityScores: List<Float> = emptyList(),
+    val recordIntervalMs: Long = StorageConfig.RECORD_INTERVAL_MS,
 )
 
 sealed interface FlashlightAction {

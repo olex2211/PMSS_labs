@@ -5,6 +5,9 @@ object StorageConfig {
     /** One reading per second goes to Room (the sensor itself runs at about 50 Hz). */
     const val RECORD_INTERVAL_MS = 1_000L
 
+    /** While the model reports walking, rows are written four times faster (lab 6 integration). */
+    const val MOTION_RECORD_INTERVAL_MS = 250L
+
     /** The chart shows only the newest points so rendering stays cheap. */
     const val CHART_POINTS = 50
 

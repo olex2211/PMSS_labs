@@ -1,0 +1,5 @@
+imu_pruned_int8.tflite
+Source: https://huggingface.co/raj5517/imu-activity-classifier (GitHub: https://github.com/RAj5517/imu_activity_classifier)
+License: MIT, see imu_activity_classifier_LICENSE.txt
+Trained by the author on UCI HAR; used here unchanged. Input [1,128,9] float32, output [1,6] softmax.
+SHA-256: 69b6f2a9f6c401a87d76f9eae359eaa8a9116562307c80788266b241ea158f25
