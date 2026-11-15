@@ -5,6 +5,11 @@ import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.lab1.FlashlightApp
+import com.example.lab1.decision.CloudCommandTracker
+import com.example.lab1.decision.DecisionEngine
+import com.example.lab1.decision.LightCommand
+import com.example.lab1.decision.LightDecision
+import com.example.lab1.decision.LightSource
 import com.example.lab1.helpers.*
 import com.example.lab1.helpers.ble.*
 import com.example.lab1.repository.CloudConfig
@@ -34,6 +39,9 @@ class FlashlightViewModel(application: Application) : AndroidViewModel(applicati
     private val flashlight = FlashlightController(application) { torch ->
         _state.update { it.copy(torch = torch) }
     }
+    private val engine = DecisionEngine()
+    private val cloudCommands = CloudCommandTracker()
+    private val vibrator = VibrationActuator(application)
     private val scanner = MockBleScanner()
     private val connector: IBleConnector = MockBleConnector()
     private val repository = (application as FlashlightApp).repository
@@ -45,6 +53,7 @@ class FlashlightViewModel(application: Application) : AndroidViewModel(applicati
     private var transferJob: Job? = null
     private var uploadJob: Job? = null
     private var networkJob: Job? = null
+    private var commandJob: Job? = null
     private var latestReading: SensorReading? = null
     private var pendingNotified = false
     private var lastUiNanos = 0L
@@ -54,7 +63,8 @@ class FlashlightViewModel(application: Application) : AndroidViewModel(applicati
     init {
         _state.update { it.copy(thresholdG = detector.thresholdG, sensorAvailable = sensor.available,
             sensorName = sensor.name, torch = flashlight.state, cameraPermission = settings.cameraAllowed(),
-            online = network.isOnlineNow(), pendingCount = repository.pending.value) }
+            online = network.isOnlineNow(), pendingCount = repository.pending.value,
+            vibratorAvailable = vibrator.available) }
         viewModelScope.launch(start = CoroutineStart.UNDISPATCHED) {
             repository.pending.collect { count -> _state.update { it.copy(pendingCount = count) } }
         }
@@ -68,8 +78,7 @@ class FlashlightViewModel(application: Application) : AndroidViewModel(applicati
                 if (packet.characteristic == FlashlightBleProfile.STATUS) {
                     FlashlightBleProfile.parseStatus(packet.payload)?.let { enabled ->
                         _state.update { it.copy(remoteLight = enabled) }
-                        // Reuses the same controller as the button and the Lab 1 shake detector.
-                        flashlight.setEnabled(enabled)
+                        applyCommand(LightCommand(enabled, LightSource.Ble))
                     }
                 }
             }
@@ -90,7 +99,8 @@ class FlashlightViewModel(application: Application) : AndroidViewModel(applicati
                 _state.update { it.copy(thresholdG = detector.thresholdG) }
             }
             FlashlightAction.SaveThreshold -> settings.saveThreshold(state.value.thresholdG)
-            FlashlightAction.ToggleLight -> flashlight.setEnabled(!state.value.torch.enabled)
+            FlashlightAction.ToggleLight -> applyCommand(LightCommand(!state.value.torch.enabled, LightSource.Manual))
+            FlashlightAction.TestVibration -> vibrate()
             FlashlightAction.RequestCamera -> event(FlashlightEvent.RequestCamera)
             FlashlightAction.PermissionResult -> _state.update { it.copy(cameraPermission = settings.cameraAllowed()) }
             FlashlightAction.ClearShakes -> {
@@ -143,6 +153,7 @@ class FlashlightViewModel(application: Application) : AndroidViewModel(applicati
         sensorJob?.cancel(); sensorJob = null
         uploadJob?.cancel(); uploadJob = null
         networkJob?.cancel(); networkJob = null
+        commandJob?.cancel(); commandJob = null
         latestReading = null
         detector.reset()
         scanJob?.cancel(); scanJob = null
@@ -228,7 +239,7 @@ class FlashlightViewModel(application: Application) : AndroidViewModel(applicati
             _state.update { it.copy(shakeCount = it.shakeCount + 1,
                 events = (listOf(ShakeEvent(timeFormat.format(Date()), sample.magnitudeG)) + it.events).take(5)) }
             viewModelScope.launch { upload(reading) }
-            if (state.value.automatic) flashlight.setEnabled(true)
+            engine.onShake(state.value.automatic, flashlight.state.enabled)?.let(::applyDecision)
             if (connector.connection.value == ConnectionStatus.Connected) {
                 write(FlashlightBleProfile.shake(v.x, v.y, v.z, sample.magnitudeG), FlashlightBleProfile.TELEMETRY)
             }
@@ -254,6 +265,49 @@ class FlashlightViewModel(application: Application) : AndroidViewModel(applicati
                 latestReading?.let { upload(it) }
             }
         }
+        commandJob = viewModelScope.launch {
+            while (true) {
+                delay(CloudConfig.COMMAND_POLL_MS)
+                pollCommand()
+            }
+        }
+    }
+
+    /** Cloud-to-device: polls control/flashlight and applies a value only when it changes in the cloud. */
+    private suspend fun pollCommand() {
+        if (!state.value.cloudEnabled || !state.value.online) return
+        repository.readCommand()
+            .onSuccess { value ->
+                _state.update { it.copy(cloudCommand = value) }
+                cloudCommands.onRead(value)?.let { enabled ->
+                    Log.i(CloudConfig.TAG, "COMMAND control/flashlight=$enabled")
+                    actuatorLog("CLOUD control/flashlight = ${if (enabled) "ON" else "OFF"}")
+                    applyCommand(LightCommand(enabled, LightSource.Cloud))
+                }
+            }
+            .onFailure { error -> Log.i(CloudConfig.TAG, "COMMAND read failed: ${error.message}") }
+    }
+
+    /** Every light change goes through [DecisionEngine]; this is the only place that drives the torch from rules. */
+    private fun applyCommand(command: LightCommand) = applyDecision(engine.onCommand(command, flashlight.state.enabled))
+
+    private fun applyDecision(result: LightDecision) {
+        if (result.changed) {
+            flashlight.setEnabled(result.enabled)
+            actuatorLog("LIGHT ${if (result.enabled) "ON" else "OFF"} (${result.source.name})")
+            _state.update { it.copy(lastLightSource = result.source, lastLightTime = timeFormat.format(Date())) }
+        }
+        if (result.vibrate) vibrate()
+    }
+
+    private fun vibrate() {
+        actuatorLog(if (vibrator.pulse()) "VIBRATE ${VibrationActuator.PULSE_MS} ms" else "VIBRATE unavailable: no vibrator")
+    }
+
+    /** Actuator events go to Logcat (tag [ACTUATOR_TAG]) and to the on-screen actuator log, apart from the BLE terminal. */
+    private fun actuatorLog(text: String) {
+        Log.i(ACTUATOR_TAG, text)
+        _state.update { it.copy(actuatorLog = (it.actuatorLog + TerminalEntry(timeFormat.format(Date()), text)).takeLast(20)) }
     }
 
     private fun syncNow() {
@@ -317,5 +371,8 @@ class FlashlightViewModel(application: Application) : AndroidViewModel(applicati
         super.onCleared()
     }
 
-    companion object { private const val OPERATION_TIMEOUT_MS = 5_000L }
+    companion object {
+        private const val OPERATION_TIMEOUT_MS = 5_000L
+        const val ACTUATOR_TAG = "FlashlightActuator"
+    }
 }

@@ -30,6 +30,7 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.lab1.helpers.ShakeDetector
+import com.example.lab1.repository.CloudConfig
 import com.example.lab1.ui.theme.Lab1Theme
 import java.util.Locale
 
@@ -66,7 +67,7 @@ fun FlashlightContent(state: FlashlightUiState, onAction: (FlashlightAction) -> 
             Modifier.fillMaxSize().safeDrawingPadding().verticalScroll(rememberScrollState()).padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            Text("LAB 03  /  VARIANT 16", color = colors.primary, style = MaterialTheme.typography.labelMedium, letterSpacing = 1.5.sp)
+            Text("LAB 04  /  VARIANT 16", color = colors.primary, style = MaterialTheme.typography.labelMedium, letterSpacing = 1.5.sp)
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text("Emergency\nFlashlight", fontWeight = FontWeight.Bold, fontSize = 34.sp, lineHeight = 37.sp)
                 Text("Shake to turn on the light", color = colors.onSurfaceVariant)
@@ -102,6 +103,8 @@ fun FlashlightContent(state: FlashlightUiState, onAction: (FlashlightAction) -> 
             }
 
             CloudPanel(state, onAction)
+
+            ManualControlPanel(state, onAction)
 
             BlePanel(state, onAction)
 
@@ -269,6 +272,36 @@ private fun BlePanel(state: FlashlightUiState, onAction: (FlashlightAction) -> U
                     Text("${entry.time} ${entry.message}", fontFamily = FontFamily.Monospace,
                         style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(bottom = 6.dp))
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ManualControlPanel(state: FlashlightUiState, onAction: (FlashlightAction) -> Unit) {
+    Card(shape = RoundedCornerShape(24.dp)) {
+        Column(Modifier.fillMaxWidth().padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text("Actuators · cloud control", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Text("Button, cloud and BLE commands apply in arrival order. A shake turns the light on and never off.",
+                style = MaterialTheme.typography.bodySmall)
+            OutlinedButton(onClick = { onAction(FlashlightAction.TestVibration) }, enabled = state.vibratorAvailable,
+                modifier = Modifier.fillMaxWidth()) {
+                Text(if (state.vibratorAvailable) "Test vibration" else "Vibrator unavailable")
+            }
+            Text("Last change: " + (state.lastLightSource?.let { "${it.name} · ${state.lastLightTime}" } ?: "none yet"),
+                fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+            Text("Cloud control/flashlight: " + when (state.cloudCommand) {
+                true -> "ON"
+                false -> "OFF"
+                null -> "not set"
+            }, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+            Text("Polled every ${CloudConfig.COMMAND_POLL_MS / 1000} s while the app is open and online.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            HorizontalDivider()
+            Text("Actuator log", fontWeight = FontWeight.Bold)
+            if (state.actuatorLog.isEmpty()) Text("No actuator events yet", style = MaterialTheme.typography.bodySmall)
+            state.actuatorLog.asReversed().take(6).forEach { entry ->
+                Text("${entry.time} ${entry.message}", fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
             }
         }
     }

@@ -38,6 +38,15 @@ class SensorRepository(
         attempt { api.upload(payload).name }.onFailure { enqueue(payload) }
     }
 
+    /** Reads the cloud command for the flashlight. Null means the node or value is not set. */
+    suspend fun readCommand(): Result<Boolean?> = withContext(ioDispatcher) {
+        attempt {
+            val response = api.readControl()
+            check(response.isSuccessful) { "HTTP ${response.code()}" }
+            response.body()?.flashlight
+        }
+    }
+
     /** Sends queued records in order and stops at the first failure. Returns how many were sent. */
     suspend fun syncPending(): Int = withContext(ioDispatcher) {
         syncLock.withLock {

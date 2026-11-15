@@ -1,6 +1,7 @@
 package com.example.lab1
 
 import com.example.lab1.repository.CloudApi
+import com.example.lab1.repository.ControlResponse
 import com.example.lab1.repository.OfflineException
 import com.example.lab1.repository.SensorPayload
 import com.example.lab1.repository.SensorReading
@@ -8,6 +9,7 @@ import com.example.lab1.repository.SensorRepository
 import com.example.lab1.repository.UploadResponse
 import com.example.lab1.repository.toPayload
 import com.google.gson.Gson
+import retrofit2.Response
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
@@ -19,11 +21,16 @@ import java.io.IOException
 class SensorRepositoryTest {
     private class FakeApi : CloudApi {
         var failing = false
+        var control: ControlResponse? = null
         val sent = mutableListOf<SensorPayload>()
         override suspend fun upload(payload: SensorPayload): UploadResponse {
             if (failing) throw IOException("no route to host")
             sent += payload
             return UploadResponse("key-${sent.size}")
+        }
+        override suspend fun readControl(): Response<ControlResponse?> {
+            if (failing) throw IOException("no route to host")
+            return Response.success(control)
         }
     }
 
@@ -82,6 +89,22 @@ class SensorRepositoryTest {
         api.failing = false
         repository.syncPending()
         assertEquals(listOf(2L, 3L), api.sent.map { it.timestamp })
+    }
+
+    @Test fun readCommandReturnsCloudFlashlightValue() = runTest {
+        val api = FakeApi().apply { control = ControlResponse(flashlight = true) }
+        assertEquals(true, repository(api).readCommand().getOrNull())
+    }
+
+    @Test fun readCommandWithoutNodeReturnsNull() = runTest {
+        val api = FakeApi()
+        assertTrue(repository(api).readCommand().isSuccess)
+        assertNull(repository(api).readCommand().getOrNull())
+    }
+
+    @Test fun readCommandFailureIsReportedNotThrown() = runTest {
+        val api = FakeApi().apply { failing = true }
+        assertTrue(repository(api).readCommand().isFailure)
     }
 
     @Test fun payloadJsonContainsDeviceTypeAxesAndTimestamp() {

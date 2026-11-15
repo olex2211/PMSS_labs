@@ -1,5 +1,6 @@
 package com.example.lab1.flashlight
 
+import com.example.lab1.decision.LightSource
 import com.example.lab1.helpers.ShakeDetector
 import com.example.lab1.helpers.TorchState
 import com.example.lab1.helpers.ble.BleDevice
@@ -40,6 +41,11 @@ data class FlashlightUiState(
     val uploadedCount: Int = 0,
     val lastCloudKey: String? = null,
     val lastSyncTime: String = "",
+    val vibratorAvailable: Boolean = true,
+    val cloudCommand: Boolean? = null,
+    val lastLightSource: LightSource? = null,
+    val lastLightTime: String = "",
+    val actuatorLog: List<TerminalEntry> = emptyList(),
 )
 
 sealed interface FlashlightAction {
@@ -61,6 +67,7 @@ sealed interface FlashlightAction {
     data object ClearTerminal : FlashlightAction
     data class CloudEnabledChanged(val enabled: Boolean) : FlashlightAction
     data object SyncNow : FlashlightAction
+    data object TestVibration : FlashlightAction
 }
 
 sealed interface FlashlightEvent {
