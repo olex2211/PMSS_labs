@@ -85,7 +85,7 @@ fun AnalyticsContent(state: AnalyticsState, onAction: (AnalyticsAction) -> Unit)
                     } else {
                         AccelerationChart(state.points, Modifier.fillMaxWidth().height(240.dp))
                     }
-                    Text("Last ${state.points.size} points, one per second, plus every shake. Shake threshold: ${number(state.thresholdG, 1)} g.",
+                    Text("Last ${state.points.size} points, one per second (four per second while walking), plus every shake. Shake threshold: ${number(state.thresholdG, 1)} g.",
                         style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
                 }
             }

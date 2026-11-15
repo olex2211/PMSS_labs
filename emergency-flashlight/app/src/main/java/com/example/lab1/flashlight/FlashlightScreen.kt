@@ -30,6 +30,8 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.lab1.helpers.ShakeDetector
+import com.example.lab1.helpers.ml.Activity
+import com.example.lab1.helpers.ml.ImuWindowBuilder
 import com.example.lab1.repository.CloudConfig
 import com.example.lab1.ui.theme.Lab1Theme
 import java.util.Locale
@@ -67,7 +69,7 @@ fun FlashlightContent(state: FlashlightUiState, onAction: (FlashlightAction) -> 
             Modifier.fillMaxSize().safeDrawingPadding().verticalScroll(rememberScrollState()).padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            Text("LAB 05  /  VARIANT 16", color = colors.primary, style = MaterialTheme.typography.labelMedium, letterSpacing = 1.5.sp)
+            Text("LAB 06  /  VARIANT 16", color = colors.primary, style = MaterialTheme.typography.labelMedium, letterSpacing = 1.5.sp)
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text("Emergency\nFlashlight", fontWeight = FontWeight.Bold, fontSize = 34.sp, lineHeight = 37.sp)
                 Text("Shake to turn on the light", color = colors.onSurfaceVariant)
@@ -101,6 +103,8 @@ fun FlashlightContent(state: FlashlightUiState, onAction: (FlashlightAction) -> 
                     }
                 }
             }
+
+            AiInsightsPanel(state)
 
             CloudPanel(state, onAction)
 
@@ -341,6 +345,42 @@ private fun CloudPanel(state: FlashlightUiState, onAction: (FlashlightAction) ->
             Button(onClick = { onAction(FlashlightAction.SyncNow) }, enabled = state.cloudEnabled, modifier = Modifier.fillMaxWidth()) {
                 Text("Send now")
             }
+        }
+    }
+}
+
+@Composable
+private fun AiInsightsPanel(state: FlashlightUiState) {
+    val colors = MaterialTheme.colorScheme
+    Card(shape = RoundedCornerShape(24.dp)) {
+        Column(Modifier.fillMaxWidth().padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text("AI Insights · on-device", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Text("TensorFlow Lite · UCI HAR activity model · no network", style = MaterialTheme.typography.bodySmall)
+            when {
+                state.modelError != null -> Text("Model unavailable: ${state.modelError}", color = colors.error)
+                !state.modelReady -> Text("Loading model…", color = colors.onSurfaceVariant)
+                !state.sensorActive -> Text("Sensors are paused", color = colors.onSurfaceVariant)
+                state.activity == null -> {
+                    Text("Collecting window: ${state.windowFill}/${ImuWindowBuilder.WINDOW}", fontFamily = FontFamily.Monospace)
+                    LinearProgressIndicator(progress = { state.windowFill / ImuWindowBuilder.WINDOW.toFloat() }, modifier = Modifier.fillMaxWidth())
+                }
+                else -> {
+                    Text("Current Activity: ${state.activity.label} (${(state.activityConfidence * 100).toInt()}%)",
+                        style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, color = colors.primary)
+                    Activity.entries.forEachIndexed { i, a ->
+                        val p = state.activityScores.getOrElse(i) { 0f }
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text(a.label, Modifier.width(132.dp), style = MaterialTheme.typography.bodySmall)
+                            LinearProgressIndicator(progress = { p.coerceIn(0f, 1f) }, modifier = Modifier.weight(1f))
+                            Text("${(p * 100).toInt()}%", Modifier.width(40.dp), style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
+                        }
+                    }
+                }
+            }
+            Text("Recording to Room every ${state.recordIntervalMs} ms" + if (state.recordIntervalMs < 1000) " (walking)" else "",
+                style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
+            Text("The model recognises activity only. The light is still driven by the shake threshold.",
+                style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
         }
     }
 }
