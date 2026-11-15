@@ -7,13 +7,14 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.lifecycle.ViewModelProvider
-import com.example.lab1.flashlight.FlashlightScreen
+import com.example.lab1.analytics.AnalyticsViewModel
 import com.example.lab1.flashlight.FlashlightViewModel
 import com.example.lab1.flashlight.FlashlightAction
 import com.example.lab1.ui.theme.Lab1Theme
 
 class MainActivity : ComponentActivity() {
     private val model by lazy { ViewModelProvider(this)[FlashlightViewModel::class.java] }
+    private val analytics by lazy { ViewModelProvider(this)[AnalyticsViewModel::class.java] }
     private val permission = registerForActivityResult(ActivityResultContracts.RequestPermission()) {
         model.onAction(FlashlightAction.PermissionResult)
     }
@@ -23,7 +24,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             Lab1Theme {
-                FlashlightScreen(model, onRequestCamera = { permission.launch(Manifest.permission.CAMERA) })
+                AppRoot(model, analytics, onRequestCamera = { permission.launch(Manifest.permission.CAMERA) })
             }
         }
     }

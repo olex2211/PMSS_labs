@@ -67,7 +67,7 @@ fun FlashlightContent(state: FlashlightUiState, onAction: (FlashlightAction) -> 
             Modifier.fillMaxSize().safeDrawingPadding().verticalScroll(rememberScrollState()).padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            Text("LAB 04  /  VARIANT 16", color = colors.primary, style = MaterialTheme.typography.labelMedium, letterSpacing = 1.5.sp)
+            Text("LAB 05  /  VARIANT 16", color = colors.primary, style = MaterialTheme.typography.labelMedium, letterSpacing = 1.5.sp)
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text("Emergency\nFlashlight", fontWeight = FontWeight.Bold, fontSize = 34.sp, lineHeight = 37.sp)
                 Text("Shake to turn on the light", color = colors.onSurfaceVariant)
@@ -325,7 +325,7 @@ private fun CloudPanel(state: FlashlightUiState, onAction: (FlashlightAction) ->
     Card(shape = RoundedCornerShape(24.dp)) {
         Column(Modifier.fillMaxWidth().padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text("Cloud sync · Firebase", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-            Text("REST over HTTPS · latest reading every 5 s and on every shake", style = MaterialTheme.typography.bodySmall)
+            Text("REST over HTTPS · unsynced Room rows every 5 s and on every shake", style = MaterialTheme.typography.bodySmall)
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 Canvas(Modifier.size(14.dp).semantics { contentDescription = "Cloud status: $statusText" }) { drawCircle(statusColor) }
                 Text(statusText, fontWeight = FontWeight.SemiBold, color = statusColor)

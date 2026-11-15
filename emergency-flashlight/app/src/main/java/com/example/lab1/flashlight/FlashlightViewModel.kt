@@ -15,6 +15,7 @@ import com.example.lab1.helpers.ble.*
 import com.example.lab1.repository.CloudConfig
 import com.example.lab1.repository.OfflineException
 import com.example.lab1.repository.SensorReading
+import com.example.lab1.repository.StorageConfig
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.CoroutineStart
@@ -54,7 +55,7 @@ class FlashlightViewModel(application: Application) : AndroidViewModel(applicati
     private var uploadJob: Job? = null
     private var networkJob: Job? = null
     private var commandJob: Job? = null
-    private var latestReading: SensorReading? = null
+    private var lastRecordMs = 0L
     private var pendingNotified = false
     private var lastUiNanos = 0L
     private var peakG = 0f
@@ -63,8 +64,7 @@ class FlashlightViewModel(application: Application) : AndroidViewModel(applicati
     init {
         _state.update { it.copy(thresholdG = detector.thresholdG, sensorAvailable = sensor.available,
             sensorName = sensor.name, torch = flashlight.state, cameraPermission = settings.cameraAllowed(),
-            online = network.isOnlineNow(), pendingCount = repository.pending.value,
-            vibratorAvailable = vibrator.available) }
+            online = network.isOnlineNow(), vibratorAvailable = vibrator.available) }
         viewModelScope.launch(start = CoroutineStart.UNDISPATCHED) {
             repository.pending.collect { count -> _state.update { it.copy(pendingCount = count) } }
         }
@@ -100,7 +100,7 @@ class FlashlightViewModel(application: Application) : AndroidViewModel(applicati
             }
             FlashlightAction.SaveThreshold -> settings.saveThreshold(state.value.thresholdG)
             FlashlightAction.ToggleLight -> applyCommand(LightCommand(!state.value.torch.enabled, LightSource.Manual))
-            FlashlightAction.TestVibration -> vibrate()
+            FlashlightAction.TestVibration -> vibrate(LightSource.Manual.name)
             FlashlightAction.RequestCamera -> event(FlashlightEvent.RequestCamera)
             FlashlightAction.PermissionResult -> _state.update { it.copy(cameraPermission = settings.cameraAllowed()) }
             FlashlightAction.ClearShakes -> {
@@ -154,7 +154,6 @@ class FlashlightViewModel(application: Application) : AndroidViewModel(applicati
         uploadJob?.cancel(); uploadJob = null
         networkJob?.cancel(); networkJob = null
         commandJob?.cancel(); commandJob = null
-        latestReading = null
         detector.reset()
         scanJob?.cancel(); scanJob = null
         disconnect()
@@ -234,11 +233,19 @@ class FlashlightViewModel(application: Application) : AndroidViewModel(applicati
         peakG = maxOf(peakG, sample.magnitudeG)
         val reading = SensorReading(x = v.x, y = v.y, z = v.z, magnitudeG = sample.magnitudeG,
             shake = sample.triggered, timestamp = System.currentTimeMillis())
-        latestReading = reading.copy(shake = false)
+        // Room gets one row per second for the time series; a shake is stored at once and sent at once.
+        if (!sample.triggered && reading.timestamp - lastRecordMs >= StorageConfig.RECORD_INTERVAL_MS) {
+            lastRecordMs = reading.timestamp
+            viewModelScope.launch { repository.record(reading) }
+        }
         if (sample.triggered) {
+            lastRecordMs = reading.timestamp
             _state.update { it.copy(shakeCount = it.shakeCount + 1,
                 events = (listOf(ShakeEvent(timeFormat.format(Date()), sample.magnitudeG)) + it.events).take(5)) }
-            viewModelScope.launch { upload(reading) }
+            viewModelScope.launch {
+                repository.record(reading)
+                syncPending()
+            }
             engine.onShake(state.value.automatic, flashlight.state.enabled)?.let(::applyDecision)
             if (connector.connection.value == ConnectionStatus.Connected) {
                 write(FlashlightBleProfile.shake(v.x, v.y, v.z, sample.magnitudeG), FlashlightBleProfile.TELEMETRY)
@@ -250,19 +257,19 @@ class FlashlightViewModel(application: Application) : AndroidViewModel(applicati
         }
     }
 
-    /** Reacts to network changes and sends the latest reading every [CloudConfig.UPLOAD_INTERVAL_MS]. */
+    /** Reacts to network changes and sends the rows Room still holds as unsynced every [CloudConfig.UPLOAD_INTERVAL_MS]. */
     private fun startCloud() {
         networkJob = viewModelScope.launch {
             network.online().collect { online ->
                 Log.i(CloudConfig.TAG, "NETWORK " + if (online) "online" else "offline")
                 _state.update { it.copy(online = online) }
-                if (online) flushPending()
+                if (online) syncPending()
             }
         }
         uploadJob = viewModelScope.launch {
             while (true) {
                 delay(CloudConfig.UPLOAD_INTERVAL_MS)
-                latestReading?.let { upload(it) }
+                syncPending()
             }
         }
         commandJob = viewModelScope.launch {
@@ -295,13 +302,24 @@ class FlashlightViewModel(application: Application) : AndroidViewModel(applicati
         if (result.changed) {
             flashlight.setEnabled(result.enabled)
             actuatorLog("LIGHT ${if (result.enabled) "ON" else "OFF"} (${result.source.name})")
+            persistEvent(result.source.name, if (result.enabled) "LIGHT_ON" else "LIGHT_OFF")
             _state.update { it.copy(lastLightSource = result.source, lastLightTime = timeFormat.format(Date())) }
         }
-        if (result.vibrate) vibrate()
+        if (result.vibrate) vibrate(result.source.name)
     }
 
-    private fun vibrate() {
-        actuatorLog(if (vibrator.pulse()) "VIBRATE ${VibrationActuator.PULSE_MS} ms" else "VIBRATE unavailable: no vibrator")
+    private fun vibrate(source: String) {
+        if (vibrator.pulse()) {
+            actuatorLog("VIBRATE ${VibrationActuator.PULSE_MS} ms")
+            persistEvent(source, "VIBRATE")
+        } else {
+            actuatorLog("VIBRATE unavailable: no vibrator")
+        }
+    }
+
+    /** Every actuator action also goes to Room so the history survives a restart. */
+    private fun persistEvent(source: String, action: String) {
+        viewModelScope.launch { repository.logActuator(source, action) }
     }
 
     /** Actuator events go to Logcat (tag [ACTUATOR_TAG]) and to the on-screen actuator log, apart from the BLE terminal. */
@@ -312,35 +330,28 @@ class FlashlightViewModel(application: Application) : AndroidViewModel(applicati
 
     private fun syncNow() {
         if (!state.value.cloudEnabled) { message("Cloud sync is off"); return }
-        viewModelScope.launch {
-            latestReading?.let { upload(it) }
-            flushPending()
-        }
+        viewModelScope.launch { syncPending() }
     }
 
-    private suspend fun upload(reading: SensorReading) {
+    /** Sends the rows that Room holds as unsynced; the indicator mirrors the result. */
+    private suspend fun syncPending() {
         if (!state.value.cloudEnabled) return
+        val wasPending = state.value.syncStatus == SyncStatus.Pending
         _state.update { it.copy(syncStatus = SyncStatus.Syncing) }
-        repository.save(reading, online = state.value.online)
-            .onSuccess { key ->
-                pendingNotified = false
-                Log.i(CloudConfig.TAG, "UPLOADED key=$key shake=${reading.shake} g=${"%.2f".format(Locale.US, reading.magnitudeG)}")
-                _state.update { it.copy(syncStatus = SyncStatus.Synced, uploadedCount = it.uploadedCount + 1,
-                    lastCloudKey = key, lastSyncTime = timeFormat.format(Date())) }
-                flushPending()
+        repository.syncPending(online = state.value.online)
+            .onSuccess { result ->
+                if (result.sent > 0 || result.left > 0) {
+                    Log.i(CloudConfig.TAG, "SYNC sent=${result.sent} left=${result.left} key=${result.lastKey}")
+                }
+                if (result.left == 0) pendingNotified = false
+                _state.update { it.copy(
+                    syncStatus = if (result.left > 0) SyncStatus.Pending else SyncStatus.Synced,
+                    uploadedCount = it.uploadedCount + result.sent,
+                    lastCloudKey = result.lastKey ?: it.lastCloudKey,
+                    lastSyncTime = if (result.sent > 0) timeFormat.format(Date()) else it.lastSyncTime) }
+                if (wasPending && result.left == 0 && result.sent > 0) message("Pending readings sent: ${result.sent}")
             }
             .onFailure { error -> markPending(error) }
-    }
-
-    private suspend fun flushPending() {
-        if (repository.pending.value == 0) return
-        val sent = repository.syncPending()
-        val left = repository.pending.value
-        Log.i(CloudConfig.TAG, "SYNC pending sent=$sent left=$left")
-        _state.update { it.copy(uploadedCount = it.uploadedCount + sent,
-            syncStatus = if (left > 0) SyncStatus.Pending else SyncStatus.Synced,
-            lastSyncTime = if (sent > 0) timeFormat.format(Date()) else it.lastSyncTime) }
-        if (sent > 0 && left == 0) { pendingNotified = false; message("Pending readings sent: $sent") }
     }
 
     private fun markPending(error: Throwable) {
